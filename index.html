@@ -922,6 +922,22 @@
       <span class="storage-meter" id="storageMeter"></span>
     </div>
     <div class="thumb-grid" id="thumbGrid"></div>
+
+    <!-- AI mass submit: filenames already carry team + task, so no manual picking. -->
+    <div class="toolbar-row" style="margin-top:32px;">
+      <h2 style="margin-bottom:0;">AI Mass Submit Photos</h2>
+    </div>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">
+      For photos already sorted into <code>Team_01.jpg</code> naming. Team comes from the
+      name, task from the number — pick a whole <code>&lt;Team&gt;_sorted</code> folder at
+      once. They land in the staging area above, pre-assigned, so you can eyeball them
+      before submitting. Anything that doesn't match a team or task is listed and skipped.
+    </p>
+    <label class="filepick" id="aiDropZone">
+      <input type="file" id="aiFileInput" accept="image/*" multiple>
+      🤖 Tap to choose sorted photo(s), or drag &amp; drop here
+    </label>
+    <div id="aiMassStatus" style="color:var(--muted);font-size:13px;"></div>
   </section>
 
   <!-- TEXT ANSWERS -->
@@ -1360,6 +1376,119 @@
     });
   }
 
+  // ---------- AI mass submit ----------
+  // Photos sorted by the AI arrive already named `Octopus_04.jpg`: the team is in
+  // the name and the task is in the number, so both assignments are derivable and
+  // nobody has to touch nine pairs of dropdowns. This feeds the same `staged`
+  // array the manual flow uses — it fills the selects in rather than replacing
+  // them, so the photos are still seen and still submitted by the same button.
+  const aiDropZone = document.getElementById('aiDropZone');
+  const aiFileInput = document.getElementById('aiFileInput');
+  const aiMassStatus = document.getElementById('aiMassStatus');
+
+  aiFileInput.addEventListener('change', e=>handleAiFiles(e.target.files));
+  aiDropZone.addEventListener('dragover', e=>{ e.preventDefault(); aiDropZone.classList.add('drag'); });
+  aiDropZone.addEventListener('dragleave', ()=>aiDropZone.classList.remove('drag'));
+  aiDropZone.addEventListener('drop', e=>{
+    e.preventDefault();
+    aiDropZone.classList.remove('drag');
+    handleAiFiles(e.dataTransfer.files);
+  });
+
+  // `Octopus_04.jpg` -> {teamName:'Octopus', num:4}. Also accepts the sorter's
+  // second-candidate suffix (`Octopus_07_b.jpg`) and hyphens in place of the
+  // underscore. Team names may contain spaces, so only the LAST underscore-number
+  // group counts as the task.
+  function parseSortedName(filename){
+    const base = filename.replace(/\.[^.]+$/, '');
+    const m = base.match(/^(.+)[_-](\d{1,2})(?:[_-]([A-Za-z]))?$/);
+    if(!m) return null;
+    return { teamName: m[1].trim(), num: parseInt(m[2],10), variant: (m[3]||'').toLowerCase() };
+  }
+
+  // Compare on letters and digits only, so `Sea Horse`, `seahorse` and
+  // `Seahorse_jpeg` all land on the same team.
+  function normalizeName(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+
+  function handleAiFiles(fileList){
+    const files = Array.from(fileList).filter(f=>f.type.startsWith('image/'));
+    if(!files.length){
+      aiMassStatus.innerHTML = '<span style="color:var(--bad,#DD4B6F);">No image files found in that selection.</span>';
+      return;
+    }
+
+    // Task number is a position among the photo tasks, not a raw id: that way it
+    // still resolves if the tasks were renamed in Setup.
+    const photoTasks = state.tasks.filter(t=>t.kind!=='text');
+    const matched = [], skipped = [];
+
+    files.forEach(file=>{
+      const parsed = parseSortedName(file.name);
+      if(!parsed){
+        skipped.push(`${file.name} — name isn't in Team_01 format`);
+        return;
+      }
+      const team = state.teams.find(t=>normalizeName(t.name)===normalizeName(parsed.teamName));
+      if(!team){
+        skipped.push(`${file.name} — no team named "${parsed.teamName}"`);
+        return;
+      }
+      const task = photoTasks[parsed.num-1];
+      if(!task){
+        skipped.push(`${file.name} — task ${parsed.num} doesn't exist (there are ${photoTasks.length} photo tasks)`);
+        return;
+      }
+      matched.push({ file, team, task, variant: parsed.variant });
+    });
+
+    if(!matched.length){
+      aiMassStatus.innerHTML = renderAiReport(0, skipped, []);
+      aiFileInput.value = '';
+      return;
+    }
+
+    // A team+task that already has a submitted photo is still staged, not
+    // dropped — re-importing after a correction is a normal thing to do — but it
+    // is called out so a duplicate isn't discovered later in the judging view.
+    const dupes = matched
+      .filter(m=>state.photos.some(p=>p.teamId===m.team.id && p.taskId===m.task.id))
+      .map(m=>`${m.file.name} — ${m.team.name} already has a photo for task ${photoTasks.indexOf(m.task)+1}`);
+
+    aiMassStatus.textContent = `Processing ${matched.length} photo(s)...`;
+    let done = 0, added = 0;
+    matched.forEach(m=>{
+      compressImage(m.file, 900, 0.72).then(dataUrl=>{
+        staged.push({ id: uid(), teamId:m.team.id, taskId:m.task.id, src: dataUrl, name: m.file.name });
+        added++;
+      }).catch(err=>{
+        console.error(err);
+        skipped.push(`${m.file.name} — could not be read as an image`);
+      }).finally(()=>{
+        done++;
+        if(done===matched.length){
+          aiFileInput.value = '';
+          renderAddTab();
+          aiMassStatus.innerHTML = renderAiReport(added, skipped, dupes);
+          document.getElementById('stagingWrap').scrollIntoView({behavior:'smooth', block:'start'});
+        }
+      });
+    });
+  }
+
+  function renderAiReport(okCount, skipped, dupes){
+    let html = okCount
+      ? `<strong>${okCount} photo(s) staged and assigned.</strong> Check them above, then Submit.`
+      : `<strong>Nothing staged.</strong>`;
+    if(dupes.length){
+      html += `<div style="margin-top:8px;"><strong>Already submitted (staged anyway):</strong><ul style="margin:4px 0 0 18px;padding:0;">`
+           + dupes.map(d=>`<li>${escapeHtml(d)}</li>`).join('') + `</ul></div>`;
+    }
+    if(skipped.length){
+      html += `<div style="margin-top:8px;"><strong>Skipped ${skipped.length}:</strong><ul style="margin:4px 0 0 18px;padding:0;">`
+           + skipped.map(s=>`<li>${escapeHtml(s)}</li>`).join('') + `</ul></div>`;
+    }
+    return html;
+  }
 
   // ---------- Written answers ----------
   function renderAnswersTab(){
