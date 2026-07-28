@@ -1037,7 +1037,7 @@
       ],
       photos: [],
       answers: {},   // taskId -> teamId -> typed answer
-      winners: {},   // taskId -> teamId
+      winners: {},   // taskId -> [teamId, ...] (a task can have multiple winners)
       textSeeded: true
     };
   }
@@ -1053,6 +1053,14 @@
     // the Object.assign above has already merged the defaults in, so any flag
     // checked on `s` would always look already-migrated.
     if(!s.answers || typeof s.answers !== 'object') s.answers = {};
+    // Migrate saves made before a task could have more than one winner:
+    // winners used to be taskId -> teamId, now it's taskId -> [teamId, ...].
+    if(!s.winners || typeof s.winners !== 'object') s.winners = {};
+    Object.keys(s.winners).forEach(taskId=>{
+      const v = s.winners[taskId];
+      if(!Array.isArray(v)) s.winners[taskId] = v ? [v] : [];
+      if(!s.winners[taskId].length) delete s.winners[taskId];
+    });
     s.tasks = (s.tasks||[]).map(t=> t.kind ? t : Object.assign({kind:'photo'}, t));
     if(!raw.textSeeded){
       const existing = new Set(s.tasks.map(t=>t.name));
@@ -1070,6 +1078,21 @@
   function setAnswer(taskId, teamId, value){
     if(!state.answers[taskId]) state.answers[taskId] = {};
     state.answers[taskId][teamId] = value;
+  }
+  function winnersFor(taskId){
+    return state.winners[taskId] || [];
+  }
+  function isTaskWinner(taskId, teamId){
+    return winnersFor(taskId).includes(teamId);
+  }
+  // A task can have several winners (e.g. two teams both nailed the answer),
+  // so awarding just adds/removes one team from that task's winner list
+  // instead of replacing whichever team held it before.
+  function toggleWinner(taskId, teamId){
+    const arr = winnersFor(taskId).slice();
+    const idx = arr.indexOf(teamId);
+    if(idx>=0) arr.splice(idx,1); else arr.push(teamId);
+    if(arr.length) state.winners[taskId] = arr; else delete state.winners[taskId];
   }
   // Storage is the one resource this app can actually run out of: photos are
   // stored as base64 and the browser cap is about 5MB. A silent failure here
@@ -1149,7 +1172,10 @@
   function removeTeam(id){
     state.teams = state.teams.filter(t=>t.id!==id);
     state.photos = state.photos.filter(p=>p.teamId!==id);
-    Object.keys(state.winners).forEach(tid=>{ if(state.winners[tid]===id) delete state.winners[tid]; });
+    Object.keys(state.winners).forEach(taskId=>{
+      state.winners[taskId] = state.winners[taskId].filter(teamId=>teamId!==id);
+      if(!state.winners[taskId].length) delete state.winners[taskId];
+    });
     Object.keys(state.answers).forEach(tid=>{
       if(state.answers[tid] && typeof state.answers[tid]==='object') delete state.answers[tid][id];
     });
@@ -1650,7 +1676,7 @@
       const d = document.createElement('button');
       d.textContent = i+1;
       d.title = (t.kind==='text'?'✍️ ':'📷 ') + t.name;
-      if(state.winners[t.id]) d.classList.add('done');
+      if(winnersFor(t.id).length) d.classList.add('done');
       if(i===judgeIndex) d.classList.add('active');
       d.addEventListener('click', ()=>gotoTask(i));
       dots.appendChild(d);
@@ -1667,7 +1693,7 @@
 
     // ----- Final slide: leaderboard only -----
     if(judgeIndex === lastSlide()){
-      const decided = state.tasks.filter(t=>state.winners[t.id]).length;
+      const decided = state.tasks.filter(t=>winnersFor(t.id).length).length;
       count.textContent = 'Final';
       title.textContent = 'Final Results';
       judged.textContent = decided < state.tasks.length
@@ -1684,12 +1710,14 @@
     document.getElementById('tab-judge').classList.remove('final-slide');
 
     const task = state.tasks[judgeIndex];
-    const winnerTeamId = state.winners[task.id];
+    const winnerTeamIds = winnersFor(task.id);
 
     count.textContent = `Task ${judgeIndex+1} of ${state.tasks.length}`;
     title.textContent = task.name;
-    const winnerTeam = winnerTeamId && state.teams.find(t=>t.id===winnerTeamId);
-    judged.textContent = winnerTeam ? `👑 Winner: ${winnerTeam.name}` : '';
+    const winnerTeams = winnerTeamIds.map(id=>state.teams.find(t=>t.id===id)).filter(Boolean);
+    judged.textContent = winnerTeams.length
+      ? `👑 Winner${winnerTeams.length>1?'s':''}: ${winnerTeams.map(t=>t.name).join(', ')}`
+      : '';
 
     // ----- Written-question slide: typed answers side by side -----
     if(task.kind === 'text'){
@@ -1699,7 +1727,7 @@
       }
       state.teams.forEach(team=>{
         const text = answerFor(task.id, team.id).trim();
-        const isWinner = winnerTeamId===team.id;
+        const isWinner = winnerTeamIds.includes(team.id);
         const card = document.createElement('div');
         card.className = 'judge-card ' + teamSlug(team.name) + (isWinner ? ' winner' : '');
         card.innerHTML = `
@@ -1707,11 +1735,10 @@
           <div class="answer-display${text?'':' blank'}">${text ? escapeHtml(text) : 'no answer given'}</div>
           <div class="body">
             <div class="team-name">${creatureImg(team.name,'lg')}<span>${escapeHtml(team.name)}</span></div>
-            <button class="primary" style="width:100%;" title="${isWinner?'Click again to undo':'Award this task'}">${isWinner ? 'Winner! <small>tap to undo</small>' : 'Pick as Winner'}</button>
+            <button class="primary" style="width:100%;" title="${isWinner?'Click again to undo':'Also award this task to this team'}">${isWinner ? 'Winner! <small>tap to undo</small>' : 'Pick as Winner'}</button>
           </div>`;
         card.querySelector('button').addEventListener('click', ()=>{
-          if(state.winners[task.id]===team.id) delete state.winners[task.id];
-          else state.winners[task.id] = team.id;
+          toggleWinner(task.id, team.id);
           save(); renderJudgeTab();
         });
         grid.appendChild(card);
@@ -1731,7 +1758,7 @@
 
     state.teams.forEach(team=>{
       const p = byTeam[team.id];
-      const isWinner = winnerTeamId===team.id;
+      const isWinner = winnerTeamIds.includes(team.id);
       const card = document.createElement('div');
       card.className = 'judge-card ' + teamSlug(team.name) + (isWinner ? ' winner' : '') + (p ? '' : ' empty');
       // A team with nothing in yet still gets a slot, so the row always reads
@@ -1744,13 +1771,13 @@
         ${media}
         <div class="body">
           <div class="team-name">${creatureImg(team.name,'lg')}<span>${escapeHtml(team.name)}</span></div>
-          <button class="primary" style="width:100%;" title="${isWinner?'Click again to undo':'Award this task'}">${isWinner ? 'Winner! <small>tap to undo</small>' : 'Pick as Winner'}</button>
+          <button class="primary" style="width:100%;" title="${isWinner?'Click again to undo':'Also award this task to this team'}">${isWinner ? 'Winner! <small>tap to undo</small>' : 'Pick as Winner'}</button>
         </div>`;
       if(p) card.querySelector('img').addEventListener('click', ()=>openLightbox(p.src));
       card.querySelector('button').addEventListener('click', ()=>{
-        // Clicking the current winner clears it, so a misclick is undoable.
-        if(state.winners[task.id]===team.id) delete state.winners[task.id];
-        else state.winners[task.id] = team.id;
+        // Clicking a current winner clears just that team, so a misclick is
+        // undoable; other teams already picked for this task stay picked.
+        toggleWinner(task.id, team.id);
         save(); renderJudgeTab();
       });
       grid.appendChild(card);
@@ -1783,7 +1810,7 @@
     // — the bars and scores carry the standings instead.
     const scores = state.teams.map(t=>({
       team: t,
-      wins: Object.values(state.winners).filter(id=>id===t.id).length
+      wins: Object.values(state.winners).filter(ids=>ids.includes(t.id)).length
     }));
     // Bars are a share of every task in the hunt, not of the current leader's
     // total — 3 of 9 should read as a third full, not as a full bar.
