@@ -100,6 +100,11 @@ input[type=file]{display:none}
   color:var(--jellyfish);font-weight:700;font-size:14px;cursor:pointer;
 }
 .file-btn:hover{background:rgba(56,176,217,.2)}
+.file-btn.drag{
+  background:rgba(65,196,109,.18);border-color:var(--seahorse);
+  border-style:solid;color:var(--foam);
+}
+.dz-hint{display:block;margin-top:3px;font-weight:400;font-size:12px;opacity:.65}
 .chosen{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:13px;color:var(--mist)}
 .chosen img{width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid var(--rule)}
 
@@ -210,7 +215,7 @@ input[type=file]{display:none}
       <div class="field">
         <label class="fld">Photo</label>
         <input type="file" id="photo" accept="image/*">
-        <label class="file-btn" for="photo" id="fileBtn">Choose a photo</label>
+        <label class="file-btn" for="photo" id="fileBtn"><span id="fileBtnText">Choose a photo</span><span class="dz-hint" id="dzHint">or drag one here</span></label>
         <div class="chosen" id="chosen" style="display:none"></div>
       </div>
 
@@ -615,9 +620,12 @@ function say(msg, ok) {
 }
 
 /* ---------- photo intake ---------- */
-$('photo').addEventListener('change', function (e) {
-  var f = e.target.files[0];
+function loadFile(f) {
   if (!f) return;
+  if (f.type && !/^image\//.test(f.type)) {
+    say('That needs to be an image file.', false);
+    return;
+  }
   var fr = new FileReader();
   fr.onload = function (ev) {
     var url = ev.target.result;
@@ -632,13 +640,35 @@ $('photo').addEventListener('change', function (e) {
       $('chosen').style.display = 'flex';
       $('chosen').innerHTML = '<img src="' + url + '" alt=""><span>' + f.name +
         ' · ' + im.naturalWidth + '×' + im.naturalHeight + '</span>';
-      $('fileBtn').textContent = 'Choose a different photo';
+      $('fileBtnText').textContent = 'Choose a different photo';
     };
     im.onerror = function () { say("That file didn't load as an image. Try another.", false); };
     im.src = url;
   };
   fr.readAsDataURL(f);
-});
+}
+
+$('photo').addEventListener('change', function (e) { loadFile(e.target.files[0]); });
+
+/* drag and drop onto the picker */
+(function () {
+  var dz = $('fileBtn');
+  function stop(e) { e.preventDefault(); e.stopPropagation(); }
+  ['dragenter', 'dragover'].forEach(function (t) {
+    dz.addEventListener(t, function (e) { stop(e); dz.classList.add('drag'); });
+  });
+  ['dragleave', 'dragend', 'drop'].forEach(function (t) {
+    dz.addEventListener(t, function (e) { stop(e); dz.classList.remove('drag'); });
+  });
+  dz.addEventListener('drop', function (e) {
+    var dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) loadFile(dt.files[0]);
+  });
+  /* a miss shouldn't make the browser navigate away to the dropped image */
+  ['dragover', 'drop'].forEach(function (t) {
+    window.addEventListener(t, function (e) { e.preventDefault(); });
+  });
+})();
 
 /* ---------- add ---------- */
 $('addBtn').addEventListener('click', function () {
@@ -660,7 +690,7 @@ $('addBtn').addEventListener('click', function () {
   pick.file = null; pick.data = ''; pick.w = 0; pick.h = 0;
   $('chosen').style.display = 'none';
   $('chosen').innerHTML = '';
-  $('fileBtn').textContent = 'Choose a photo';
+  $('fileBtnText').textContent = 'Choose a photo';
   render();
 });
 
