@@ -634,6 +634,39 @@
     border-radius:14px;
   }
 
+  /* ---------- bonus / penalty slide ---------- */
+  .bonus-card .body{padding:16px;text-align:center;}
+  .bonus-stepper{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:16px;
+    margin-top:10px;
+  }
+  .step-btn{
+    background:#fff;
+    border:2px solid var(--ink);
+    color:var(--ink);
+    width:38px;height:38px;
+    flex:0 0 38px;
+    border-radius:50%;
+    font-size:20px;
+    line-height:1;
+    cursor:pointer;
+    box-shadow:0 2px 0 var(--ink);
+  }
+  .step-btn:hover{background:var(--amber);}
+  .step-btn:active{transform:translateY(1px);box-shadow:0 0 0 var(--ink);}
+  .bonus-value{
+    min-width:52px;
+    text-align:center;
+    font-family:var(--display);
+    font-size:26px;
+    color:var(--muted);
+  }
+  .bonus-value.pos{color:var(--cyan-deep);}
+  .bonus-value.neg{color:var(--red-deep);}
+
   /* ---------- leaderboard ---------- */
   .board-inline{
     margin-top:28px;
@@ -706,6 +739,13 @@
     color:var(--ink);
     min-width:64px;
     text-align:right;
+  }
+  .score .bonus-note{
+    display:block;
+    font-family:var(--body);
+    font-size:11px;
+    font-weight:400;
+    color:var(--muted);
   }
 
   /* Final slide: leaderboard only, scaled up for the room. */
@@ -1038,6 +1078,7 @@
       photos: [],
       answers: {},   // taskId -> teamId -> typed answer
       winners: {},   // taskId -> [teamId, ...] (a task can have multiple winners)
+      bonuses: {},   // teamId -> point adjustment (+/-), set from the Bonuses/Penalties slides
       textSeeded: true
     };
   }
@@ -1061,6 +1102,7 @@
       if(!Array.isArray(v)) s.winners[taskId] = v ? [v] : [];
       if(!s.winners[taskId].length) delete s.winners[taskId];
     });
+    if(!s.bonuses || typeof s.bonuses !== 'object') s.bonuses = {};
     s.tasks = (s.tasks||[]).map(t=> t.kind ? t : Object.assign({kind:'photo'}, t));
     if(!raw.textSeeded){
       const existing = new Set(s.tasks.map(t=>t.name));
@@ -1093,6 +1135,12 @@
     const idx = arr.indexOf(teamId);
     if(idx>=0) arr.splice(idx,1); else arr.push(teamId);
     if(arr.length) state.winners[taskId] = arr; else delete state.winners[taskId];
+  }
+  function bonusFor(teamId){
+    return state.bonuses[teamId] || 0;
+  }
+  function setBonus(teamId, value){
+    if(value) state.bonuses[teamId] = value; else delete state.bonuses[teamId];
   }
   // Storage is the one resource this app can actually run out of: photos are
   // stored as base64 and the browser cap is about 5MB. A silent failure here
@@ -1176,6 +1224,7 @@
       state.winners[taskId] = state.winners[taskId].filter(teamId=>teamId!==id);
       if(!state.winners[taskId].length) delete state.winners[taskId];
     });
+    delete state.bonuses[id];
     Object.keys(state.answers).forEach(tid=>{
       if(state.answers[tid] && typeof state.answers[tid]==='object') delete state.answers[tid][id];
     });
@@ -1606,8 +1655,11 @@
   prevTaskBtn.addEventListener('click', ()=>gotoTask(judgeIndex-1));
   nextTaskBtn.addEventListener('click', ()=>gotoTask(judgeIndex+1));
 
-  // There is one extra slide past the last task: the final leaderboard.
-  function lastSlide(){ return state.tasks.length; }
+  // The deck is: a Bonuses/Penalties slide, one slide per task, a second
+  // (synced — same state) Bonuses/Penalties slide, then the final leaderboard.
+  function bonusStartSlide(){ return 0; }
+  function bonusEndSlide(){ return state.tasks.length + 1; }
+  function lastSlide(){ return state.tasks.length + 2; }
 
   function gotoTask(i){
     if(!state.tasks.length) return;
@@ -1672,15 +1724,29 @@
     // Tasks may have been deleted since we last rendered.
     judgeIndex = Math.max(0, Math.min(judgeIndex, lastSlide()));
 
+    const hasBonuses = Object.keys(state.bonuses).length > 0;
+    const bonusDot = (slideIdx)=>{
+      const d = document.createElement('button');
+      d.textContent = '±';
+      d.title = 'Bonuses / Penalties';
+      if(hasBonuses) d.classList.add('done');
+      if(slideIdx===judgeIndex) d.classList.add('active');
+      d.addEventListener('click', ()=>gotoTask(slideIdx));
+      dots.appendChild(d);
+    };
+
+    bonusDot(bonusStartSlide());
     state.tasks.forEach((t,i)=>{
       const d = document.createElement('button');
       d.textContent = i+1;
       d.title = (t.kind==='text'?'✍️ ':'📷 ') + t.name;
       if(winnersFor(t.id).length) d.classList.add('done');
-      if(i===judgeIndex) d.classList.add('active');
-      d.addEventListener('click', ()=>gotoTask(i));
+      const slideIdx = i+1;
+      if(slideIdx===judgeIndex) d.classList.add('active');
+      d.addEventListener('click', ()=>gotoTask(slideIdx));
       dots.appendChild(d);
     });
+    bonusDot(bonusEndSlide());
     const finalDot = document.createElement('button');
     finalDot.textContent = '🏆';
     finalDot.title = 'Final leaderboard';
@@ -1709,10 +1775,18 @@
     boardHeading.style.display = '';
     document.getElementById('tab-judge').classList.remove('final-slide');
 
-    const task = state.tasks[judgeIndex];
+    // ----- Bonus/Penalty slides: identical UI at the start and just before
+    // the final leaderboard, both reading and writing the same state.bonuses,
+    // so they're always in sync with each other. -----
+    if(judgeIndex === bonusStartSlide() || judgeIndex === bonusEndSlide()){
+      renderBonusSlide(judgeIndex === bonusStartSlide() ? 'Before Task 1' : 'Before Final Results');
+      return;
+    }
+
+    const task = state.tasks[judgeIndex-1];
     const winnerTeamIds = winnersFor(task.id);
 
-    count.textContent = `Task ${judgeIndex+1} of ${state.tasks.length}`;
+    count.textContent = `Task ${judgeIndex} of ${state.tasks.length}`;
     title.textContent = task.name;
     const winnerTeams = winnerTeamIds.map(id=>state.teams.find(t=>t.id===id)).filter(Boolean);
     judged.textContent = winnerTeams.length
@@ -1797,6 +1871,49 @@
     });
   }
 
+  // Renders the Bonuses/Penalties editor. Called from two different slide
+  // positions but always reads/writes the same state.bonuses, so a change
+  // made on one slide shows up on the other automatically.
+  function renderBonusSlide(subtitle){
+    const count = document.getElementById('slideCount');
+    const title = document.getElementById('slideTitle');
+    const judged = document.getElementById('slideJudged');
+    const grid = document.getElementById('judgeGrid');
+
+    count.textContent = subtitle;
+    title.textContent = 'Bonuses / Penalties';
+    const adjusted = Object.keys(state.bonuses).length;
+    judged.textContent = adjusted ? `${adjusted} team${adjusted>1?'s':''} adjusted` : '';
+
+    if(!state.teams.length){
+      grid.innerHTML = '<div class="empty-note">Add teams in the Setup tab first.</div>';
+      return;
+    }
+    state.teams.forEach(team=>{
+      const val = bonusFor(team.id);
+      const card = document.createElement('div');
+      card.className = 'judge-card bonus-card ' + teamSlug(team.name);
+      card.innerHTML = `
+        <div class="body">
+          <div class="team-name">${creatureImg(team.name,'lg')}<span>${escapeHtml(team.name)}</span></div>
+          <div class="bonus-stepper">
+            <button class="step-btn minus" title="Subtract a point">−</button>
+            <div class="bonus-value${val>0?' pos':val<0?' neg':''}">${val>0?'+':''}${val}</div>
+            <button class="step-btn plus" title="Add a point">+</button>
+          </div>
+        </div>`;
+      card.querySelector('.minus').addEventListener('click', ()=>{
+        setBonus(team.id, bonusFor(team.id)-1);
+        save(); renderJudgeTab();
+      });
+      card.querySelector('.plus').addEventListener('click', ()=>{
+        setBonus(team.id, bonusFor(team.id)+1);
+        save(); renderJudgeTab();
+      });
+      grid.appendChild(card);
+    });
+  }
+
   // ---------- Leaderboard ----------
   function renderBoard(){
     const list = document.getElementById('boardList');
@@ -1808,27 +1925,31 @@
     // Rows stay in roster order on purpose. During a live reveal the eye tracks
     // a team by position, so re-sorting on every pick makes the board unreadable
     // — the bars and scores carry the standings instead.
-    const scores = state.teams.map(t=>({
-      team: t,
-      wins: Object.values(state.winners).filter(ids=>ids.includes(t.id)).length
-    }));
+    const scores = state.teams.map(t=>{
+      const wins = Object.values(state.winners).filter(ids=>ids.includes(t.id)).length;
+      const bonus = bonusFor(t.id);
+      return { team: t, wins, bonus, total: wins + bonus };
+    });
     // Bars are a share of every task in the hunt, not of the current leader's
-    // total — 3 of 9 should read as a third full, not as a full bar.
+    // total — 3 of 9 should read as a third full, not as a full bar. Clamped
+    // because bonuses/penalties can push the total outside that range.
     const totalTasks = Math.max(1, state.tasks.length);
-    const topWins = Math.max(0, ...scores.map(s=>s.wins));
+    const topTotal = Math.max(0, ...scores.map(s=>s.total));
     scores.forEach(s=>{
-      const isLeader = s.wins>0 && s.wins===topWins;
+      const isLeader = s.total>0 && s.total===topTotal;
       const row = document.createElement('div');
       row.className = 'board-row ' + teamSlug(s.team.name) + (isLeader ? ' lead' : '');
       // Custom teams have no mascot, so fall back to an initial rather than a
       // blank cell. A position number would be wrong here — rows never re-sort.
       const mascot = creatureImg(s.team.name)
         || `<span class="rank-initial">${escapeHtml((s.team.name||'?').trim().charAt(0).toUpperCase())}</span>`;
+      const barPct = Math.max(0, Math.min(100, s.total/totalTasks*100));
+      const bonusNote = s.bonus ? `<span class="bonus-note">${s.bonus>0?'+':''}${s.bonus} bonus</span>` : '';
       row.innerHTML = `
         <div class="rank">${mascot}</div>
         <div class="name">${escapeHtml(s.team.name)}${isLeader ? '<span class="lead-crown">\u{1F451}</span>' : ''}</div>
-        <div class="bar-wrap"><div class="bar-fill" style="width:${(s.wins/totalTasks*100)}%"></div></div>
-        <div class="score">${s.wins} / ${state.tasks.length}</div>
+        <div class="bar-wrap"><div class="bar-fill" style="width:${barPct}%"></div></div>
+        <div class="score">${s.total} / ${state.tasks.length}${bonusNote}</div>
       `;
       list.appendChild(row);
     });
